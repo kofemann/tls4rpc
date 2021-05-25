@@ -1,15 +1,14 @@
 package org.dcache.oncrpc4j.tls;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
-import java.io.Reader;
-import java.io.StringReader;
+import java.net.InetSocketAddress;
 import java.security.Security;
 import java.security.cert.CertificateException;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.SSLContext;
 
+import com.google.common.net.HostAndPort;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.dcache.oncrpc4j.rpc.OncRpcProgram;
 import org.dcache.oncrpc4j.rpc.OncRpcSvc;
@@ -25,6 +24,12 @@ import java.security.KeyStoreException;
 import java.util.List;
 import javax.net.ssl.TrustManager;
 
+import org.dcache.oncrpc4j.rpc.RpcAuthTypeNone;
+import org.dcache.oncrpc4j.rpc.RpcAuthTypeTls;
+import org.dcache.oncrpc4j.rpc.RpcAuthTypeUnix;
+import org.dcache.oncrpc4j.rpc.RpcCall;
+import org.dcache.oncrpc4j.rpc.RpcTransport;
+import org.dcache.oncrpc4j.rpc.net.IpProtocolType;
 import org.dcache.oncrpc4j.xdr.XdrVoid;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
@@ -64,6 +69,18 @@ public class Main {
   @Option(name = "-help", usage = "Print help screen")
   private boolean help;
 
+  @Option(
+      name = "-connect",
+      usage = "host/port to connect in the client mode",
+      metaVar = "<host:port>")
+  private String connect;
+
+  @Option(
+      name = "-mode",
+      usage = "run in server mode, defaults to \"server\"",
+      metaVar = "server|client")
+  private String mode = "server";
+
   public static void main(String[] args) throws Exception {
     new Main().run(args);
   }
@@ -71,12 +88,20 @@ public class Main {
   public void run(String[] args) throws Exception {
 
     CmdLineParser parser = new CmdLineParser(this);
-
+    boolean isServer = true;
     try {
       parser.parseArgument(args);
+
+      if (!List.of("server", "client").contains(mode)) {
+        throw new CmdLineException(parser, "Invalid mode: " + mode);
+      }
+
+      isServer = mode.equals("server");
+
       if (help) {
         System.out.println();
-        System.out.print("Usage: \n\n   tls4rpc"); parser.printSingleLineUsage(System.out);
+        System.out.print("Usage: \n\n   tls4rpc");
+        parser.printSingleLineUsage(System.out);
         System.out.println();
         System.exit(0);
       }
@@ -90,32 +115,57 @@ public class Main {
       System.exit(1);
     }
 
-    SSLContext sslContext = buildSSLContext(certFile, keyFile, new char[0], trustedCa);
+    SSLContext sslContext = createSslContext(certFile, keyFile, new char[0], trustedCa);
 
-    OncRpcSvc svc =
+    OncRpcSvc svc = null;
+    OncRpcSvcBuilder svcBuilder =
         new OncRpcSvcBuilder()
+            .withStartTLS()
             .withoutAutoPublish()
             .withTCP()
             .withSameThreadIoStrategy()
-            .withBindAddress("127.0.0.1")
-            .withPort(rpcPort)
             .withSSLContext(sslContext)
-            .withStartTLS()
-            .withRpcService(
-                new OncRpcProgram(progNum, progVers), c -> c.acceptedReply(0, XdrVoid.XDR_VOID))
-            .withServiceName("svc")
-            .build();
+            .withServiceName("rpc-over-tls (" + mode + ")");
 
     try {
       ClassLoader.getSystemResourceAsStream("banner").transferTo(System.out);
-      System.out.println("Starting on port   : " + rpcPort);
+      if (isServer) {
+        svcBuilder
+            .withPort(rpcPort)
+            .withRpcService(
+                new OncRpcProgram(progNum, progVers), c -> c.acceptedReply(0, XdrVoid.XDR_VOID));
+      } else {
+        svcBuilder.withClientMode();
+      }
+
+      svc = svcBuilder.build();
+
+      svc.start();
+      if (isServer) {
+        System.out.println("Starting on port   : " + svc.getInetSocketAddress(IpProtocolType.TCP));
+      }
+      System.out.println("Mode               : " + mode);
       System.out.println("RPC program        : " + progNum);
       System.out.println("RPC program version: " + progVers);
       System.out.println("Trusted CA         : " + trustedCa);
       System.out.println("Hostcert           : " + certFile);
       System.out.println("Hostkey            : " + keyFile);
 
-      svc.start();
+      if (!isServer) {
+        HostAndPort hostAndPort = HostAndPort.fromString(connect);
+        RpcTransport t =
+            svc.connect(new InetSocketAddress(hostAndPort.getHost(), hostAndPort.getPort()));
+        var clntCall = new RpcCall(progNum, progVers, new RpcAuthTypeNone(), t);
+
+        // poke server to start tls
+        clntCall.call(0, XdrVoid.XDR_VOID, XdrVoid.XDR_VOID, new RpcAuthTypeTls());
+        clntCall.getTransport().startTLS();
+
+        while (true) {
+          clntCall.call(0, XdrVoid.XDR_VOID, XdrVoid.XDR_VOID, RpcAuthTypeUnix.ofCurrentUnixUser());
+        }
+      }
+
       Thread.currentThread().join();
     } catch (InterruptedException e) {
       System.out.println("Exiting ... ");
@@ -135,7 +185,7 @@ public class Main {
    * @throws KeyStoreException
    * @throws CertificateException
    */
-  public static SSLContext buildSSLContext(
+  public static SSLContext createSslContext(
       String certificateFile, String certificateKeyFile, char[] keyPassword, String trustStore)
       throws IOException, GeneralSecurityException {
 
