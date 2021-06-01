@@ -8,6 +8,10 @@ import java.security.cert.CertificateException;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.SSLContext;
 
+import com.codahale.metrics.ConsoleReporter;
+import com.codahale.metrics.MetricAttribute;
+import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.Timer;
 import com.google.common.net.HostAndPort;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.dcache.oncrpc4j.rpc.OncRpcProgram;
@@ -22,6 +26,8 @@ import eu.emi.security.authn.x509.impl.PEMCredential;
 import java.security.GeneralSecurityException;
 import java.security.KeyStoreException;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import javax.net.ssl.TrustManager;
 
 import org.dcache.oncrpc4j.rpc.RpcAuthTypeNone;
@@ -117,6 +123,16 @@ public class Main {
 
     SSLContext sslContext = createSslContext(certFile, keyFile, new char[0], trustedCa);
 
+    final MetricRegistry metrics = new MetricRegistry();
+    final ConsoleReporter reporter =
+        ConsoleReporter.forRegistry(metrics)
+            .convertRatesTo(TimeUnit.SECONDS)
+            .convertDurationsTo(TimeUnit.MILLISECONDS)
+            .disabledMetricAttributes(
+                Set.of(MetricAttribute.M1_RATE, MetricAttribute.M5_RATE, MetricAttribute.M15_RATE))
+            .build();
+    reporter.start(10, TimeUnit.SECONDS);
+
     OncRpcSvc svc = null;
     OncRpcSvcBuilder svcBuilder =
         new OncRpcSvcBuilder()
@@ -133,7 +149,10 @@ public class Main {
         svcBuilder
             .withPort(rpcPort)
             .withRpcService(
-                new OncRpcProgram(progNum, progVers), c -> c.acceptedReply(0, XdrVoid.XDR_VOID));
+                new OncRpcProgram(progNum, progVers), c ->  {
+                  metrics.meter("Request Count").mark();
+                  c.acceptedReply(0, XdrVoid.XDR_VOID);
+                });
       } else {
         svcBuilder.withClientMode();
       }
@@ -162,7 +181,10 @@ public class Main {
         clntCall.getTransport().startTLS();
 
         while (true) {
+          Timer timer = metrics.timer("Requests");
+          Timer.Context context = timer.time();
           clntCall.call(0, XdrVoid.XDR_VOID, XdrVoid.XDR_VOID, RpcAuthTypeUnix.ofCurrentUnixUser());
+          context.stop();
         }
       }
 
