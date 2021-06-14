@@ -175,10 +175,7 @@ public class Main {
         RpcTransport t =
             svc.connect(new InetSocketAddress(hostAndPort.getHost(), hostAndPort.getPort()));
         var clntCall = new RpcCall(progNum, progVers, new RpcAuthTypeNone(), t);
-
-        // poke server to start tls
-        clntCall.call(0, XdrVoid.XDR_VOID, XdrVoid.XDR_VOID, new RpcAuthTypeTls());
-        clntCall.getTransport().startTLS();
+        clntCall.startTLS();
 
         while (true) {
           Timer timer = metrics.timer("Requests");
