@@ -174,7 +174,7 @@ public class Main {
         HostAndPort hostAndPort = HostAndPort.fromString(connect);
         RpcTransport t =
             svc.connect(new InetSocketAddress(hostAndPort.getHost(), hostAndPort.getPort()));
-        var clntCall = new RpcCall(progNum, progVers, new RpcAuthTypeNone(), t);
+        var clntCall = new RpcCall(progNum, progVers,  RpcAuthTypeUnix.ofCurrentUnixUser(), t);
         clntCall.startTLS();
 
         while (true) {
